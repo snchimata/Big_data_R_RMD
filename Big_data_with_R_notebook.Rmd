@@ -1,0 +1,1135 @@
+---
+title: "Big Data with R"
+output:
+  html_document:default
+  pdf_document: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+
+####Load necessary packages
+```{r}
+lbs <- c("dbplyr","DBI","dplyr","RMySQL","sparklyr","tidypredict","odbc","yaml","dbplyr","dbplot","purrr","shiny","shinydashboard","data.table","pool","DT","gutenbergr","wordcloud")
+sapply(lbs, function(x) require(x,character.only = TRUE) || {install.packages(x);library(x,character.only = TRUE)} )
+
+```
+
+####DSN Connection
+```{r}
+library(DBI)
+icon <- dbConnect(odbc::odbc(), "MySQL")
+icon
+```
+####Drivers list in ODBC
+```{r}
+library(odbc)
+odbcListDrivers()[1:2]
+```
+####Manual connection setup
+```{r}
+# impala <- dbConnect(
+#   drv = odbc::odbc(),
+#   driver = "/opt/odbc-drivers/impala/bin/lib/libimpalaodbc_sb64.so",
+#   host = "ybolcldrmstr.yotabites.com",
+#   port = 21050,
+#   database = "default",
+#   uid = rstudioapi::askForPassword("Enter Username"),
+#   pwd = rstudioapi::askForPassword("Enter Password"),
+#   SSL             =1,
+#   TrustedCerts    ="/opt/cloudera/security/CAcerts/root.pem",
+#   ThriftTransport =1,
+#   AuthMech        =1
+# )
+```
+####External File Method
+```{r}
+conf <- yaml.load_file("~/config.yml")
+conf
+```
+####MySQL
+```{r}
+dw <- conf[["mysql"]]
+con = dbConnect(MySQL(), host=dw$SERVER, dbname= 'development', user=dw$USER, password=dw$Password)
+con
+```
+####Impala
+```{r}
+icon <- dbConnect(odbc::odbc(), "Impala")
+icon
+```
+####Each time you make a query, you are querying the pool, rather than the database. Under the hood, the pool will either give you an idle connection that it previously fetched from the database or, if it has no free connections, fetch one and give it to you. You never have to create or close connections directly: the pool knows when it should grow, shrink or keep steady. You only need to close the pool when you’re done.
+https://shiny.rstudio.com/articles/pool-basics.html
+https://shiny.rstudio.com/articles/pool-advanced.html
+
+```{r}
+icon <- pool::dbPool(odbc::odbc(), dsn =  "Impala")
+icon
+```
+####dplyr List of tables
+```{r}
+dplyr::db_list_tables(con)
+```
+
+```{r}
+RMySQL::dbListTables(con)
+```
+#### Using dbGetQuery to extract data into environment variables
+```{r}
+df_mydb <- dbGetQuery(con, "SELECT * from development.sales_table")
+df_mydbi <- dbGetQuery(icon, "SELECT * from default.emp4")
+head(df_mydbi)
+```
+
+```{r}
+head(df_mydbi)
+```
+
+####Disconnect from DB
+```{r}
+# odbc::dbDisconnect(con)
+```
+```{r}
+# odbc::dbDisconnect(icon)
+```
+####With Shiny Apps use onStop for Regular connections use poolClose
+```{r}
+#onStop(function() {
+#  poolClose(icon)
+#})
+```
+##Dplyr Basics
+#### Function to create a reference to a table without loading data into memory
+```{r}
+Alphabet <- tbl(con, in_schema("development", "Alphabet"))
+Sales <- tbl(con, in_schema("development", "sales_table"))
+```
+
+####Data can be previewed using the pointer variable but it is not stored
+```{r}
+Alphabet 
+```
+####To preview the SQL statement that will be sent to the database
+```{r}
+show_query(Alphabet)
+
+Alphabet %>%  show_query()
+
+Alphabet %>%  head(10) %>%  show_query()
+```
+####To simulate the SQL statement like SQLServer
+```{r}
+Alphabet %>%  head(10) %>%  sql_render(con = simulate_mssql()) 
+```
+####Preview how Sys.time() is translated
+```{r}
+Alphabet %>%  mutate(today = Sys.time()) %>%  show_query()
+```
+
+```{r}
+Alphabet %>%  mutate(today = now()) %>%  select(today) %>%  head()
+```
+####Preview how Sys.time() is translated when prefixing !!
+```{r}
+Alphabet %>%  mutate(today = !!Sys.time()) %>%  show_query()
+```
+###Aggregations
+###Counts
+```{r}
+tbl(con, in_schema("development", "Alphabet")) %>%  tally()
+#Alphabet  %>%  tally()
+```
+####Summarize
+```{r warning=FALSE}
+Alphabet %>%
+  summarise(
+    mean_volume = mean(Volume, na.rm = TRUE),
+    max_value = max(High, na.rm = TRUE),
+    min_airport_name = min(Low,  na.rm = TRUE),
+    total_records = n()
+  )
+```
+
+```{r}
+Alphabet %>%  summarise(x = max(volume, na.rm = TRUE))
+```
+###Data transformation
+####Group and Sort
+```{r}
+Sales %>%  group_by(product,payment_type) %>%  tally()  %>% arrange(desc(n)) %>% head(6)
+```
+#### Order and Arrange data
+```{r}
+Sales %>%  group_by(product,payment_type) %>%  tally() %>% arrange(desc(n))
+#%>% mutate(percent = n/sum(n, na.rm = TRUE))
+
+```
+#### Summary/Aggregation of multiple columns
+```{r}
+Alphabet %>%select(High,Low)%>%  summarise_all(mean, na.rm = TRUE)
+```
+
+```{r warning=FALSE}
+iris %>% summarise_all(funs(mean))
+```
+
+```{r}
+Alphabet %>%
+  summarise_at(c("High", "Low"), mean, na.rm = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+Alphabet %>%
+  summarise_if(is.numeric,mean, na.rm = TRUE)
+```
+```{r}
+Sales%>%select(product,price)%>%group_by(product)%>%summarise_all(mean,na.rm=TRUE)
+```
+#### Filter/Record level Data
+```{r}
+Sales %>% 
+  filter(
+    price >= 1200,
+    product == "product1",
+    county == "United States"
+  ) %>%
+  tally() #or head() to check sample
+```
+####Collect and View - Use collect() and View() to preview the data in the IDE. Make sure to always limit the number of returned rows
+```{r}
+Sales %>% 
+  filter(
+    price >= 1200,
+    product == "product1",
+    county == "United States"
+  ) %>%
+  collect() %>%
+  head(100) %>%
+  # -> my_preview #to collect data into my_preview variable
+View("my_preview")
+```
+
+```{r}
+planes <- nycflights13::planes
+planes%>%mutate(product = case_when(engines ==1 ~ "Product1",
+                                    engines ==2 ~ "Product2",
+                                    engines ==3 ~ "Product3",
+                                    engines ==4 ~ "Product4")) -> planes
+head(planes)
+```
+####Data Enrichement - addition of data to DB
+```{r}
+dbWriteTable(con, "planes", planes, temporary = TRUE, overwrite = TRUE)
+```
+
+```{r}
+tbl_plane <- tbl(con, "planes")
+head(tbl_plane)
+```
+```{r}
+flights <- nycflights13::flights
+
+#dbWriteTable(icon, "flights", flights, temporary = TRUE)
+#tbl_flight <- tbl(icon, "flights")
+
+dbWriteTable(con, "flights", flights, temporary = TRUE,overwrite = TRUE)
+tbl_flight <- tbl(con, "flights")
+head(tbl_flight)
+```
+
+```{r}
+combined <- Sales %>%left_join(tbl_plane, by = c("product"="product"))
+head(combined,5)
+combined <- tbl_flight %>%
+  left_join(tbl_plane, by = "tailnum") 
+head(combined,5)
+```
+####View a sample by filter
+```{r}
+combined %>%
+  filter(engines >= 3) %>%
+  head()
+```
+
+```{r message=FALSE, warning=FALSE}
+combined %>%
+  filter(manufacturer == "MCDONNELL DOUGLAS") %>%
+  group_by(engines,tailnum) %>%
+  tally() 
+```
+
+```{r warning=FALSE}
+combined %>%
+  filter(manufacturer == "MCDONNELL DOUGLAS") %>%
+  group_by(tailnum) %>%
+  tally() %>%
+  summarise(planes = n(),
+            avg_flights = mean(n, na.rm = TRUE),
+            max_flights = max(n, na.rm = TRUE),
+            min_flights = min(n, na.rm = TRUE))
+```
+###Visualizations
+####Use collect() bring back the aggregated results into a “pass-through” variable called by_month
+```{r}
+by_month <- 
+  tbl_plane %>%
+  group_by(year) %>%
+  tally() %>%
+  mutate(n = as.integer(n)) %>%
+  collect() 
+
+head(by_month)
+```
+####Plot results using ggplot2 and Plotly
+```{r}
+library(ggplot2)
+library(plotly)
+theme_set(theme_light())
+```
+
+```{r}
+ggplot(by_month) +
+  geom_line(aes(x = year, y = n)) 
+
+Z = ggplot(by_month) +
+  geom_line(aes(x = year, y = n)) 
+
+ggplotly(Z)
+```
+#####Without collecting data into a variable
+```{r}
+  tbl_plane %>%
+  group_by(year) %>%
+  tally() %>%
+  mutate(n = as.integer(n)) %>%
+  collect()  %>%
+  ggplot() +
+  geom_line(aes(x = year, y = n)) 
+```
+#### Plot specific data segments
+```{r}
+tbl_flight %>%
+  group_by(carrier) %>%
+  tally() %>%
+  arrange(desc(n)) %>%
+  head(5) %>%
+  collect() %>%
+  ggplot() +
+  geom_col(aes(x = carrier, y = n, fill = n)) +
+  theme(legend.position="none") +
+  coord_flip() +  # Rotate cols into rows
+  labs(title = "Top 5 Carriers", 
+       subtitle = "Source: Datawarehouse",
+       x = "Carrier Name", 
+       y = "# of Flights")
+```
+####To pull specific column data into vectors
+```{r}
+top5 <- tbl_flight %>%
+  group_by(carrier) %>%
+  tally() %>%
+  arrange(desc(n)) %>%
+  head(5) %>%
+  pull(carrier)
+
+top5
+```
+####Filter by pulled field
+```{r}
+tbl_flight %>%
+  filter(carrier %in% top5) %>%
+  group_by(carrier) %>%
+  summarise(n = mean(arr_delay, na.rm = TRUE))
+```
+
+####Visualize DB plot
+```{r}
+library(dbplot)
+tbl_flight %>%
+  dbplot_line(month,mean(dep_delay,na.rm = TRUE))+
+  labs(title = "Monthly flights",
+       x = "Month",
+       y = "Mean Dep Delay") +
+  scale_x_continuous(breaks = 1:12)
+```
+```{r}
+tbl_flight %>%
+  dbplot_bar(month, mean(dep_delay, na.rm = TRUE))  +
+  scale_x_continuous(
+    labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+    breaks = 1:12
+  )
+```
+####Histogram
+```{r}
+flights %>%
+  dbplot_histogram(distance, binwidth = 300)
+```
+####Raster plot
+```{r}
+na.omit(flights) %>%
+  dbplot_raster(dep_time, arr_time, resolution = 500)
+```
+####To check underlying plot data
+```{r}
+departure <- na.omit(flights) %>%
+  db_compute_raster(dep_time, arr_time)
+head(departure)
+```
+
+```{r}
+departure %>%
+  filter(`n()` > 1000) %>%
+  ggplot() +
+  geom_raster(aes(x = dep_time, y = arr_time, fill = `n()`))
+```
+###Modeling
+####Sql Native sampling
+```{r message=FALSE, warning=FALSE}
+#sql_sample <-  dbGetQuery(con, build_sql(remote_query(tbl_flight), " TABLESAMPLE SYSTEM (0.1)"))
+#sql_sample
+#Function not supported by DB
+```
+####Use a record’s unique ID to produce a sample
+```{r}
+limit <- tbl_flight %>%
+  summarise(
+    max = max(flight, na.rm = TRUE),
+    min = min(flight, na.rm = TRUE)
+  ) %>%
+  collect()
+
+head(limit)
+```
+####Use sample to get 0.1% of IDs
+```{r}
+sampling <- sample(
+  limit$min:limit$max, 
+  round((limit$max -limit$min) * 0.001))
+head(sampling)
+```
+####Create a model & test
+```{r}
+model_data <- tbl_flight %>%
+  mutate(
+    season = case_when(
+      month >= 3 & month <= 5  ~ "Spring",
+      month >= 6 & month <= 8  ~ "Summmer",
+      month >= 9 & month <= 11 ~ "Fall",
+      month == 12 | month <= 2  ~ "Winter"
+    )
+  ) %>%
+  select(dep_delay,season,arr_delay)
+
+head(model_data)
+```
+####Create a simple lm() model
+```{r}
+model_lm <- lm(arr_delay ~ . , data = model_data)
+summary(model_lm)
+```
+
+####Create a test data set by combining the sampling and model data set routines
+```{r}
+library(purrr)
+  # test_sample <- 1:12 %>%
+  # map_df(~sample_segment(.x, 100)) %>%
+  #   mutate(
+  #   season = case_when(
+  #     month >= 3 & month <= 5  ~ "Spring",
+  #     month >= 6 & month <= 8  ~ "Summmer",
+  #     month >= 9 & month <= 11 ~ "Fall",
+  #     month == 12 | month <= 2  ~ "Winter"
+  #   )
+  # ) %>%
+  # select(arrdelay, season, depdelay) 
+
+#test_sample <- head(na.omit(model_data),1000) %>% collect()
+#test_sample <-1%>% map_df(sample_frac(model_data,.x))
+
+test_sample <-na.omit(model_data)%>%collect()%>%sample_n(100)
+
+```
+####Run a simple routine to check accuracy
+```{r}
+test_sample %>%
+  mutate(p = predict(model_lm, test_sample),
+         over = abs(p - arr_delay) <= 15) %>% na.omit() %>%
+  group_by(over) %>% 
+  tally() %>%
+  mutate(percent = round(n / sum(n), 2))
+```
+####Tidypredict to run predictions inside the database
+```{r}
+library(tidypredict)
+tidypredict_fit(model_lm)
+```
+####tidypredict_sql() to see the resulting SQL statement
+```{r}
+tidypredict_sql(model_lm, con)
+```
+####Run the prediction inside dplyr
+```{r}
+tbl_flight %>%
+  filter(month == 2,
+         day == 1) %>%
+    mutate(
+    season = case_when(
+      month >= 3 & month <= 5  ~ "Spring",
+      month >= 6 & month <= 8  ~ "Summmer",
+      month >= 9 & month <= 11 ~ "Fall",
+      month == 12 | month <= 2  ~ "Winter"
+    )
+  ) %>%
+  select( season, dep_delay) %>%
+  tidypredict_to_column(model_lm) %>%
+  head()
+```
+####Compare predictions to ensure results are within range
+```{r}
+test <- tidypredict_test(model_lm,threshold = 1.5e-12)
+test
+```
+####View the records that exceeded the threshold
+```{r}
+test$raw_results %>%
+  filter(fit_threshold)
+```
+####Parsed Model
+```{r}
+pm <- parse_model(model_lm)
+pm
+```
+####Verify that the resulting table can be used to get the fit formula
+```{r}
+tidypredict_fit(pm)
+```
+####Save the parsed model for later use
+```{r}
+library(readr)
+write_csv(pm, "parsedmodel.csv")
+```
+###Intro to sparklyr
+####Local Spark
+```{r}
+sc <- spark_connect(master = "local")
+# use spark_install(version = "2.0.0") to Install a specific version
+```
+####To use cluster environment
+```{r}
+# Spark home environment variable has to be setup by admin, if not explicitly input version
+# To check version in terminal type below command
+# spark-submit --version
+#sc <- spark_connect(master = "yarn-client", version= "1.6.0", spark_home = #'/opt/cloudera/parcels/CDH/lib/spark/')
+```
+
+####To disconnect spark connection
+```{r}
+#spark_disconnect(sc)
+```
+####Copy data into session
+```{r}
+spark_mtcars <- sdf_copy_to(sc, mtcars, "my_mtcars",overwrite = TRUE)
+```
+####Simple dplyr example
+```{r}
+spark_mtcars %>%
+  group_by(am) %>%
+  summarise(avg_wt = mean(wt, na.rm = TRUE))
+```
+
+```{r}
+spark_flights <- sdf_copy_to(sc, flights, "flights", overwrite = TRUE)
+spark_flights %>% tally()
+```
+####pointers can also be used to move data into spark
+```{r}
+sdf_copy_to(sc, tbl_flight, "spk_flight", overwrite = TRUE)
+sdf_copy_to(sc, Alphabet, "spk_Alphabet", overwrite = TRUE)
+```
+####spark read file
+```{r}
+spark_50str <- spark_read_csv(
+  sc,
+  name = "start",
+  path = "/home/schimata/samples",
+  memory = FALSE,
+  columns = NULL,
+  infer_schema = FALSE
+)
+```
+####cache a subset of the data in Spark
+```{r}
+cached_flights <- spark_flights %>%
+  mutate(
+    arr_delay = ifelse(arr_delay == "NaN", 0, arr_delay),
+    dep_delay = ifelse(dep_delay == "NaN", 0, dep_delay)
+  ) %>%
+  select(
+    month,
+    day,
+    arr_time,
+    arr_delay,
+    dep_delay,
+    sched_arr_time,
+    sched_dep_time,
+    distance
+  ) %>%
+  mutate_all(as.numeric)
+```
+####compute() to extract the data into Spark memory
+```{r}
+cached_flights <- compute(cached_flights, "sub_flights")
+cached_flights %>%  tally()
+```
+####Overview of a few sdf_ functions: http://spark.rstudio.com/reference/#section-spark-dataframes
+####Use sdf_pivot to create a column for each value in month
+```{r}
+cached_flights %>%
+  arrange(month) %>% 
+  sdf_pivot(month ~ day)
+```
+#Another Example
+```{r}
+iris_tbl <- sdf_copy_to(sc, iris, name = "iris_tbl", overwrite = TRUE)
+
+# aggregating by mean
+iris_tbl %>%
+  mutate(Petal_Width = ifelse(Petal_Width > 1.5, "High", "Low" )) %>%
+  sdf_pivot(Petal_Width ~ Species,
+            fun.aggregate = list(Petal_Length = "mean"))
+```
+##### Partition data
+```{r}
+partition <- cached_flights %>%
+  sdf_partition(training = 0.01, testing = 0.09, other = 0.9)
+
+tally(partition$training)
+tally(partition$testing)
+tally(partition$other)
+```
+####See how to use Spark’s feature transformers: 
+####http://spark.rstudio.com/reference/#section-spark-feature-transformers
+
+####Use ft_binarizer() to identify “delayed” flights
+
+```{r}
+cached_flights %>%
+  ft_binarizer(
+    input_col = "dep_delay",
+    output_col = "delayed",
+    threshold = 15
+  ) %>%
+  select(
+    dep_delay,
+    delayed
+  ) %>%
+  head(100)
+```
+####Use ft_bucketizer() to split the data into groups
+```{r}
+cached_flights %>%
+  ft_bucketizer(
+    input_col = "sched_dep_time",
+    output_col = "dephour",
+    splits = c(0, 400, 800, 1200, 1600, 2000, 2400)
+  ) %>%
+  select(
+    sched_dep_time,
+    dephour
+  ) %>%
+  head(100)
+
+
+iris_tbl %>%
+  ft_bucketizer(input_col  = "Sepal_Length",
+                output_col = "Sepal_Length_bucket",
+                splits     = c(0, 4.5, 5, 8)) %>%
+  select(Sepal_Length, Sepal_Length_bucket, Species)
+```
+###Start Modeling
+```{r}
+sample_data <- cached_flights %>%
+  filter(!is.na(arr_delay)) %>%
+  ft_binarizer(
+    input_col = "arr_delay",
+    output_col = "delayed",
+    threshold = 15
+  ) %>%
+  ft_bucketizer(
+    input_col = "sched_dep_time",
+    output_col = "dephour",
+    splits = c(0, 400, 800, 1200, 1600, 2000, 2400)
+  ) %>%
+  mutate(dephour = paste0("h", as.integer(dephour))) %>%
+  sdf_partition(training = 0.01, testing = 0.09, other = 0.9)
+```
+#### drop spark table
+```{r}
+#dplyr::db_drop_table(sc, "training")
+```
+####Remove R env variable
+```{r}
+#rm(training)
+```
+#### register a sql code to environment and cache data into memory for faster performance(Compute also does sdf_register)
+```{r}
+training <- sdf_register(sample_data$training, "training")
+tbl_cache(sc, "training")
+#training <- compute(sample_data$training, "training")
+```
+
+```{r}
+delayed_model <- training %>%
+  ml_logistic_regression(delayed ~ dep_delay + dephour)
+```
+
+```{r}
+summary(delayed_model)
+```
+
+```{r}
+delayed_testing <- sdf_predict(delayed_model, sample_data$testing)
+delayed_testing %>%
+  head()
+```
+####To check effectiveness of the new model
+```{r}
+delayed_testing %>%
+  group_by(delayed, prediction) %>%
+  tally()
+```
+### Distributed R
+####Basic distribution
+```{r}
+flights_sample <- spark_flights %>%
+  sample_frac(0.01) %>%
+  mutate(arr_delay = as.numeric(arr_delay)) %>%
+  ft_binarizer(
+    input_col = "arr_delay",
+    output_col = "delayed",
+    threshold = 15
+  ) %>%
+  compute("flights_sample1")
+```
+####Apply an R Function in Spark environment variable - spark_apply(spk_tbl, func)
+```{r}
+spark_apply(spark_mtcars,nrow)
+```
+####Pass a function to operate
+```{r}
+spark_apply(
+  spark_mtcars, 
+  function(x) mean(as.numeric(x$mpg))
+)
+```
+
+```{r}
+spark_apply(spark_mtcars, nrow, group_by = "gear", columns = "count")
+```
+
+```{r}
+spark_apply(
+  spark_mtcars,
+  function(x) mean(as.numeric(x$mpg)),
+  group_by = "gear",
+  columns = "avg_mpg"
+)
+```
+####Use Non Base R packages
+```{r}
+models <- spark_apply(
+  spark_mtcars,
+  function(e) broom::tidy(glm(vs ~ mpg+cyl+carb, data = e, family = "binomial")),
+  #names = c("term", "estimate", "std_error", "statistic", "p_value"),
+  group_by = "gear"
+)
+
+models
+```
+#### Partition data
+```{r}
+model_data <- sdf_partition(
+  tbl(sc, "flights"),
+  training = 0.01,
+  testing = 0.01,
+  rest = 0.98
+)
+```
+
+```{r}
+pipeline_df <- model_data$training %>%
+  mutate(
+    arr_delay = ifelse(arr_delay == "NaN", 0, arr_delay),
+    dep_delay = ifelse(dep_delay == "NaN", 0, dep_delay)
+  ) %>%
+  select(
+    month,
+    day,
+    arr_time,
+    arr_delay,
+    dep_delay,
+    sched_arr_time,
+    sched_dep_time,
+    distance
+  ) %>%
+  mutate_all(as.numeric)
+```
+#### Create pipeline model
+```{r}
+flights_pipeline <- ml_pipeline(sc) %>%
+  ft_dplyr_transformer(
+    tbl = pipeline_df
+  ) %>%
+  ft_binarizer(
+    input_col = "arr_delay",
+    output_col = "delayed",
+    threshold = 15
+  ) %>%
+  ft_bucketizer(
+    input_col = "sched_dep_time",
+    output_col = "dephour",
+    splits = c(0, 400, 800, 1200, 1600, 2000, 2400)
+  ) %>%
+  ft_r_formula(delayed ~ arr_delay + dephour) %>%
+  ml_logistic_regression()
+
+flights_pipeline
+```
+####Fit (train) the pipeline’s model
+```{r}
+model <- ml_fit(flights_pipeline, na.omit(model_data$training))
+model
+```
+####Predictions
+```{r}
+predictions <- ml_transform(
+  x = model,
+  dataset = na.omit(model_data$testing)
+)
+
+head(predictions)
+```
+```{r}
+predictions %>%
+  group_by(delayed, prediction) %>%
+  tally()
+```
+####Save Model
+```{r}
+ml_save(model, "saved_model", overwrite = TRUE)
+```
+####Check files
+```{r}
+list.files("saved_model")
+```
+####Save data pipeline
+```{r}
+ml_save(flights_pipeline, "saved_pipeline", overwrite = TRUE)
+```
+####Reload Model
+```{r}
+reload <- ml_load(sc, "saved_model")
+reload
+```
+
+```{r}
+library(lubridate)
+
+current <- tbl(sc, "flights") %>%
+  filter(
+    month == !! month(now()),
+    day == !! day(now())
+  )
+
+show_query(current)
+head(current)
+```
+
+```{r}
+new_predictions <- ml_transform(
+  #x = reload,   This reload models and applies the reloaded model
+  x = reload,
+  dataset = current
+)
+new_predictions
+```
+####Reload Pipeline
+```{r}
+flights_pipeline1 <- ml_load(sc, "saved_pipeline")
+flights_pipeline1
+```
+#### New sample
+```{r}
+sample <- tbl(sc, "flights") %>% na.omit() %>%
+  head(1000)
+sample
+```
+
+#### Refit with new sample
+```{r}
+new_model <- ml_fit(flights_pipeline1, sample)
+new_model
+```
+####Saving new model
+```{r}
+ml_save(new_model, "new_model", overwrite = TRUE)
+```
+###Create Dashboard
+####Basic structure - ui and server
+####Dashboard code has to be run to view the output shiny app
+```{r}
+ui <- dashboardPage(
+  dashboardHeader(title = "Quick Example"),
+  dashboardSidebar(selectInput("select", "Selection", c("one", "two"))),
+  dashboardBody(
+    valueBoxOutput("total"),
+    dataTableOutput("monthly")
+  )
+)
+
+server <- function(input, output, session) {
+  output$total <- renderValueBox(valueBox(100, subtitle = "Flights"))
+  output$monthly <- renderDataTable(data.table(mtcars))
+}
+
+shinyApp(ui, server)
+```
+
+#### Integrating input list and updating dashboard items
+```{r}
+
+airline_list <- nycflights13::airlines %>%  
+  select(carrier, name) %>%          # In case more fields are added
+  collect()  %>%                     # All would be collected anyway
+  split(.$name) %>%                  # Create a list item for each name
+  map(~.$carrier)                    # Add the carrier code to each item
+
+head(airline_list)
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Quick Example"),
+  dashboardSidebar(selectInput("select", "Selection", airline_list)),
+  dashboardBody(
+    valueBoxOutput("total"),
+    dataTableOutput("monthly")
+  )
+)
+
+server <- function(input, output, session) {
+  base_dashboard <- reactive({
+    flights %>%
+      filter(carrier == input$select)
+  })
+  output$total <- renderValueBox(
+    base_dashboard() %>%
+      tally() %>%
+      pull() %>%
+      valueBox(subtitle = "Flights")
+  )
+  output$monthly <- renderDataTable(data.table(
+    base_dashboard() %>%
+      group_by(month) %>%
+      tally() %>%
+      collect() %>%
+      mutate(n = as.numeric(n)) %>%
+      rename(flights = n) %>%
+      arrange(month)
+  ))
+}
+shinyApp(ui, server)
+```
+
+```{r}
+airline_list <- nycflights13::airlines %>%  
+  select(carrier, name) %>%          # In case more fields are added
+  collect()  %>%                     # All would be collected anyway
+  split(.$name) %>%                  # Create a list item for each name
+  map(~.$carrier)                    # Add the carrier code to each item
+
+head(airline_list)
+ui <- dashboardPage(
+  dashboardHeader(title = "Quick Example"),
+  dashboardSidebar(selectInput("select", "Selection", airline_list)),
+  dashboardBody(
+    tabsetPanel(id = "tabs",
+      tabPanel(
+        title = "Dashboard", 
+        value = "page1", 
+        valueBoxOutput("total"),
+        dataTableOutput("monthly")
+      )
+      )
+    )
+)
+server <- function(input, output, session) {
+  
+  base_dashboard <- reactive({
+    flights %>% 
+      filter(carrier == input$select)})
+  output$total <- renderValueBox({
+    base_dashboard() %>%
+      tally() %>%
+      pull() %>%
+      valueBox(subtitle = "Flights")})
+    
+  output$monthly <- renderDataTable(data.table({
+    base_dashboard() %>%
+      group_by(month) %>%
+      tally() %>%
+      collect() %>%
+      mutate(n = as.numeric(n)) %>%
+      rename(flights = n) %>%
+      arrange(month)}
+     #,list(target = "cell")
+     #,rownames = FALSE
+    )
+    
+    )
+  
+ observeEvent(input$monthly_cell_clicked, {
+
+    cell <- input$monthly_cell_clicked
+    if(!is.null(cell$value)){
+      tab_title <- paste0(month.name[cell$value], "_", input$select)
+      appendTab(inputId = "tabs",
+                tabPanel(
+                  tab_title,
+                  DT::renderDataTable({
+                    base_dashboard() %>%
+                      filter(month == cell$value) %>%
+                      select(3:10) %>%
+                      head(100) %>%
+                      collect()
+                  }, rownames = FALSE)
+                ))
+      updateTabsetPanel(session, "tabs", selected = tab_title)
+    }
+  })
+
+}
+shinyApp(ui, server)
+```
+###Text Mining with Sparklyr
+```{r}
+twain <- gutenberg_download(53)
+doyle <- gutenberg_download(69)
+```
+
+```{r}
+library(readr)
+Restaurant_Reviews <- read_delim("Restaurant_Reviews.tsv",
+                                 "\t", escape_double = FALSE, trim_ws = TRUE)
+View(Restaurant_Reviews)
+
+
+# restaurent_path <-  paste0("file:/home/schimata/Restaurent_Reviews.tsv")
+#res_reviews <-  spark_read_csv(sc, "res_reviews", "Restaurent_Reviews.tsv", delimiter = "\t")
+#tsv is not working
+```
+
+```{r}
+tbl_res_reviews <- sdf_copy_to(sc, Restaurant_Reviews, name = "res_reviews", overwrite = TRUE)
+tbl_twain <- sdf_copy_to(sc, twain, name = "twain", overwrite = TRUE)
+tbl_doyle <- sdf_copy_to(sc, doyle, name = "doyle", overwrite = TRUE)
+```
+
+```{r}
+head(tbl_res_reviews)
+```
+
+```{r}
+# all_words <- tbl_doyle %>%
+#   mutate(author = "doyle") %>%
+#   sdf_bind_rows({
+#     tbl_twain %>%
+#       mutate(author = "twain")
+#   }) %>%
+#   filter(nchar(line) > 0)
+```
+
+```{r}
+all_words <- tbl_res_reviews %>%
+  mutate(line = regexp_replace(Review, "[_\"\'():;,.!?\\-]", " ")) 
+```
+
+```{r}
+all_words <- all_words %>%
+  ft_tokenizer(input_col = "line",
+               output_col = "word_list")
+```
+
+```{r}
+head(all_words, 4)
+```
+
+
+```{r}
+all_words <- all_words %>%
+  ft_stop_words_remover(input_col = "word_list",
+                        output_col = "wo_stop_words"
+                        )
+
+head(all_words, 4)
+```
+
+```{r}
+all_words <- all_words %>%
+  mutate(word = explode(wo_stop_words)) %>%
+  select(word, Liked) %>%
+  filter(nchar(word) > 2)
+```
+
+```{r}
+head(all_words)
+```
+```{r}
+all_words <- all_words %>%
+  compute("all_words")
+```
+
+```{r}
+word_count <- all_words %>%
+  group_by(word, Liked) %>%
+  tally() %>%
+  arrange(desc(n)) 
+  
+word_count
+```
+
+```{r}
+liked_unique <- filter(word_count, Liked == 1) %>%
+  arrange(desc(n)) %>%
+  compute("liked_unique")
+
+liked_unique
+```
+```{r}
+liked_unique %>%
+  head(100) %>%
+  collect() %>%
+  with(wordcloud::wordcloud(
+    word, 
+    n,
+    colors = c("#999999", "#E69F00", "#56B4E9","#56B4E9")))
+```
+```{r}
+# odbc::dbDisconnect(con)
+# 
+# odbc::dbDisconnect(icon)
+# 
+# poolClose(icon)
+# 
+# spark_disconnect(sc)
+
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
